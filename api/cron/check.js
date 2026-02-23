@@ -1,93 +1,38 @@
 "use strict";
 
-const { Receiver } = require("@upstash/qstash");
 const { getLiveStreams, getNews, getTheater, getBirthdays } = require("../../lib/jkt48api");
 const { sendPushToAll } = require("../../lib/push");
 const { getAllTokens, hasInCache, addToCache, removeFromCache, getAllFromCache } = require("../../lib/storage");
 
 const BIRTHDAY_REMINDER_DAYS = 7;
 
-function getRawBody(req) {
-  return new Promise(function(resolve, reject) {
-    if (req.method === "GET") return resolve(Buffer.alloc(0));
-    var chunks = [];
-    req.on("data", function(chunk) { chunks.push(chunk); });
-    req.on("end", function() { resolve(Buffer.concat(chunks)); });
-    req.on("error", reject);
-  });
-}
-
-function verifyRequest(req) {
-  return Promise.resolve().then(function() {
-    var cronSecret = process.env.CRON_SECRET;
-    var auth = req.headers["authorization"];
-
-    if (cronSecret && auth === "Bearer " + cronSecret) {
-      console.log("[AUTH] OK via CRON_SECRET");
-      return true;
-    }
-
-    var currentKey = process.env.QSTASH_CURRENT_SIGNING_KEY;
-    var nextKey    = process.env.QSTASH_NEXT_SIGNING_KEY;
-    var signature  = req.headers["upstash-signature"];
-
-    if (currentKey && nextKey && signature) {
-      var receiver = new Receiver({ currentSigningKey: currentKey, nextSigningKey: nextKey });
-      return getRawBody(req).then(function(body) {
-        return receiver.verify({
-          signature: signature,
-          body: body.toString(),
-          url: "https://" + req.headers.host + req.url,
-        });
-      }).then(function(isValid) {
-        if (isValid) { console.log("[AUTH] OK via QStash"); return true; }
-        return false;
-      }).catch(function(err) {
-        console.error("[AUTH] QStash error:", err.message);
-        return false;
-      });
-    }
-
-    if (!cronSecret && !currentKey) {
-      console.warn("[AUTH] No auth configured — dev mode");
-      return true;
-    }
-
-    return false;
-  });
-}
-
 module.exports = function handler(req, res) {
-  return verifyRequest(req).then(function(ok) {
-    if (!ok) return res.status(401).json({ error: "Unauthorized" });
+  var start = Date.now();
+  console.log("[CRON] start " + new Date().toISOString());
 
-    var start = Date.now();
-    console.log("[CRON] start " + new Date().toISOString());
+  return getAllTokens().then(function(tokens) {
+    console.log("[CRON] tokens: " + tokens.length);
 
-    return getAllTokens().then(function(tokens) {
-      console.log("[CRON] tokens: " + tokens.length);
+    if (tokens.length === 0) {
+      return res.json({ ok: true, message: "No tokens registered", ms: 0 });
+    }
 
-      if (tokens.length === 0) {
-        return res.json({ ok: true, message: "No tokens registered", ms: 0 });
-      }
-
-      return Promise.allSettled([
-        checkLive(tokens),
-        checkNews(tokens),
-        checkTheater(tokens),
-        checkBirthday(tokens),
-      ]).then(function(results) {
-        var r = {
-          ok: true,
-          ms: Date.now() - start,
-          live:     results[0].status === "fulfilled" ? results[0].value : { error: String(results[0].reason) },
-          news:     results[1].status === "fulfilled" ? results[1].value : { error: String(results[1].reason) },
-          theater:  results[2].status === "fulfilled" ? results[2].value : { error: String(results[2].reason) },
-          birthday: results[3].status === "fulfilled" ? results[3].value : { error: String(results[3].reason) },
-        };
-        console.log("[CRON] done " + r.ms + "ms");
-        return res.json(r);
-      });
+    return Promise.allSettled([
+      checkLive(tokens),
+      checkNews(tokens),
+      checkTheater(tokens),
+      checkBirthday(tokens),
+    ]).then(function(results) {
+      var r = {
+        ok: true,
+        ms: Date.now() - start,
+        live:     results[0].status === "fulfilled" ? results[0].value : { error: String(results[0].reason) },
+        news:     results[1].status === "fulfilled" ? results[1].value : { error: String(results[1].reason) },
+        theater:  results[2].status === "fulfilled" ? results[2].value : { error: String(results[2].reason) },
+        birthday: results[3].status === "fulfilled" ? results[3].value : { error: String(results[3].reason) },
+      };
+      console.log("[CRON] done " + r.ms + "ms");
+      return res.json(r);
     });
   }).catch(function(err) {
     console.error("[CRON] fatal:", err.message);
@@ -113,7 +58,7 @@ function checkLive(tokens) {
             title: "\uD83D\uDD34 " + stream.name + " sedang LIVE!",
             body: tipe + " Live" + (mulai ? " \u2022 Mulai " + mulai + " WIB" : "") + " \u2014 Ketuk untuk nonton!",
             data: { type: "live", room_id: stream.chat_room_id, url_key: stream.url_key, slug: stream.slug },
-          }).then(function() { return addToCache("live", id); }).then(function() { sent++; console.log("[LIVE] sent " + stream.name); });
+          }).then(function() { return addToCache("live", id); }).then(function() { sent++; });
         });
       });
     });
@@ -123,7 +68,9 @@ function checkLive(tokens) {
         var cleanChain = Promise.resolve();
         cached.forEach(function(id) {
           if (!activeIds.has(id)) {
-            cleanChain = cleanChain.then(function() { return removeFromCache("live", id).then(function() { cleared++; }); });
+            cleanChain = cleanChain.then(function() {
+              return removeFromCache("live", id).then(function() { cleared++; });
+            });
           }
         });
         return cleanChain.then(function() { return { sent: sent, active: activeIds.size, cleared: cleared }; });
