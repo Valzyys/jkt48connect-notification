@@ -57,8 +57,8 @@ function checkLive(tokens) {
             ? new Date(stream.started_at).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Jakarta" })
             : "";
           return sendPushToAll(tokens, {
-            title: "\uD83D\uDD34 " + stream.name + " sedang LIVE!",
-            body: tipe + " Live" + (mulai ? " \u2022 Mulai " + mulai + " WIB" : "") + " \u2014 Ketuk untuk nonton!",
+            title: "Live - " + stream.name + " sedang LIVE!",
+            body: tipe + " Live" + (mulai ? " - Mulai " + mulai + " WIB" : "") + " - Ketuk untuk nonton!",
             data: { type: "live", room_id: stream.chat_room_id, url_key: stream.url_key, slug: stream.slug },
           }).then(function() { return addToCache("live", id); }).then(function() { sent++; });
         });
@@ -95,7 +95,7 @@ function checkNews(tokens) {
         return hasInCache("news", id).then(function(cached) {
           if (cached) return;
           return sendPushToAll(tokens, {
-            title: "\uD83D\uDCF0 Berita Terbaru JKT48",
+            title: "Berita Terbaru JKT48",
             body: item.title || "Ada berita baru dari JKT48!",
             data: { type: "news", news_id: item.id, mongo_id: item._id, date: item.date },
           }).then(function() { return addToCache("news", id); }).then(function() { sent++; });
@@ -122,11 +122,11 @@ function checkTheater(tokens) {
             ? new Date(show.date).toLocaleString("id-ID", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Jakarta" })
             : "";
           var seitansai = (show.seitansai && show.seitansai.length)
-            ? " \u2022 Seitansai: " + show.seitansai.map(function(s) { return s.name; }).join(", ")
+            ? " - Seitansai: " + show.seitansai.map(function(s) { return s.name; }).join(", ")
             : "";
           return sendPushToAll(tokens, {
-            title: "\uD83C\uDFAD Theater: " + show.title,
-            body: tgl + " WIB \u2022 " + show.member_count + " member" + seitansai,
+            title: "Theater: " + show.title,
+            body: tgl + " WIB - " + show.member_count + " member" + seitansai,
             data: { type: "theater", theater_id: show.id, url: show.url, seitansai: show.seitansai || [] },
           }).then(function() { return addToCache("theater", id); }).then(function() { sent++; });
         });
@@ -157,7 +157,7 @@ function checkBirthday(tokens) {
             return hasInCache("birthday", todayKey).then(function(cached) {
               if (cached) return;
               return sendPushToAll(tokens, {
-                title: "\uD83C\uDF82 Selamat Ulang Tahun " + name + "!",
+                title: "Selamat Ulang Tahun " + name + "!",
                 body: name + " JKT48 hari ini berulang tahun ke-" + age + "! Kirimkan ucapanmu!",
                 data: { type: "birthday", url_key: url_key, subtype: "today", age: age },
               }).then(function() { return addToCache("birthday", todayKey); }).then(function() { sent++; });
@@ -178,7 +178,7 @@ function checkBirthday(tokens) {
               if (cached) return;
               var countdown = daysLeft === 1 ? "Besok ulang tahun!" : daysLeft + " hari lagi ulang tahun!";
               return sendPushToAll(tokens, {
-                title: "\uD83C\uDF80 " + name + " JKT48 \u2014 " + countdown,
+                title: "Reminder: " + name + " JKT48 - " + countdown,
                 body: name + " akan berulang tahun ke-" + age + " dalam " + daysLeft + " hari. Siapkan ucapanmu!",
                 data: { type: "birthday", url_key: url_key, subtype: "reminder", days_left: daysLeft, age: age },
               }).then(function() { return addToCache("birthday", rKey); }).then(function() { sent++; });
