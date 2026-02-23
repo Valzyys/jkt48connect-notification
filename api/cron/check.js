@@ -1,7 +1,7 @@
 /**
  * api/cron/check.js
  *
- * Vercel Cron Job — berjalan setiap 1 menit (konfigurasi di vercel.json).
+ * Vercel Cron Job / QStash — berjalan setiap 1 menit.
  *
  * Flow:
  *   1. Ambil semua ExpoPushToken dari KV storage
@@ -10,10 +10,17 @@
  *   4. Push dikirim via Expo Push Service → FCM/APNs → device
  *      BEKERJA meskipun app di-kill total
  *
- * Dilindungi dengan CRON_SECRET (set di Vercel env vars).
- * Vercel otomatis menyuntikkan header Authorization saat menjalankan cron.
+ * Auth (dual mode):
+ *   - Vercel Cron  → Authorization: Bearer <CRON_SECRET>
+ *   - QStash       → upstash-signature header (verifikasi kriptografis)
+ *
+ * Env vars yang dibutuhkan:
+ *   CRON_SECRET                  (untuk Vercel Cron)
+ *   QSTASH_CURRENT_SIGNING_KEY   (untuk QStash)
+ *   QSTASH_NEXT_SIGNING_KEY      (untuk QStash)
  */
 
+const { Receiver } = require("@upstash/qstash");
 const { getLiveStreams, getNews, getTheater, getBirthdays } = require("../../lib/jkt48api");
 const { sendPushToAll } = require("../../lib/push");
 const {
@@ -26,15 +33,79 @@ const {
 
 const BIRTHDAY_REMINDER_DAYS = 7;
 
-module.exports = async function handler(req, res) {
-  // Vercel otomatis kirim Authorization header dengan CRON_SECRET saat menjalankan cron.
-  // Manual call tanpa secret akan ditolak.
+// ── AUTH ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Baca raw body dari request (dibutuhkan untuk verifikasi signature QStash).
+ */
+function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+/**
+ * Verifikasi request dari Vercel Cron (CRON_SECRET) atau QStash (signature).
+ * @returns {Promise<boolean>}
+ */
+async function verifyRequest(req) {
   const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret) {
-    const auth = req.headers.authorization;
-    if (auth !== `Bearer ${cronSecret}`) {
-      return res.status(401).json({ error: "Unauthorized" });
+  const auth = req.headers.authorization;
+
+  // 1. Cek Vercel Cron secret
+  if (cronSecret && auth === `Bearer ${cronSecret}`) {
+    console.log("[AUTH] ✅ Verified via CRON_SECRET");
+    return true;
+  }
+
+  // 2. Cek QStash signature
+  const currentKey = process.env.QSTASH_CURRENT_SIGNING_KEY;
+  const nextKey    = process.env.QSTASH_NEXT_SIGNING_KEY;
+  const signature  = req.headers["upstash-signature"];
+
+  if (currentKey && nextKey && signature) {
+    try {
+      const receiver = new Receiver({
+        currentSigningKey: currentKey,
+        nextSigningKey: nextKey,
+      });
+
+      const body = await getRawBody(req);
+
+      const isValid = await receiver.verify({
+        signature,
+        body: body.toString(),
+        url: `https://${req.headers.host}${req.url}`,
+      });
+
+      if (isValid) {
+        console.log("[AUTH] ✅ Verified via QStash signature");
+        return true;
+      }
+    } catch (err) {
+      console.error("[AUTH] ❌ QStash verify error:", err.message);
+      return false;
     }
+  }
+
+  // 3. Dev mode — izinkan jika tidak ada secret sama sekali dikonfigurasi
+  if (!cronSecret && !currentKey) {
+    console.warn("[AUTH] ⚠️  No auth configured — allowing (dev mode only)");
+    return true;
+  }
+
+  return false;
+}
+
+// ── HANDLER ───────────────────────────────────────────────────────────────────
+
+module.exports = async function handler(req, res) {
+  const isVerified = await verifyRequest(req);
+  if (!isVerified) {
+    return res.status(401).json({ error: "Unauthorized" });
   }
 
   const start = Date.now();
@@ -94,7 +165,7 @@ async function checkLive(tokens) {
       : "";
 
     await sendPushToAll(tokens, {
-      title: `${stream.name} sedang LIVE!`,
+      title: `🔴 ${stream.name} sedang LIVE!`,
       body: `${tipe} Live${mulai ? ` • Mulai ${mulai} WIB` : ""} — Ketuk untuk nonton!`,
       data: {
         type: "live",
@@ -132,7 +203,7 @@ async function checkNews(tokens) {
     if (!id || await hasInCache("news", id)) continue;
 
     await sendPushToAll(tokens, {
-      title: "Berita Terbaru JKT48",
+      title: "📰 Berita Terbaru JKT48",
       body: item.title ?? "Ada berita baru dari JKT48!",
       data: { type: "news", news_id: item.id, mongo_id: item._id, date: item.date },
     });
@@ -166,7 +237,7 @@ async function checkTheater(tokens) {
       : "";
 
     await sendPushToAll(tokens, {
-      title: `Theater: ${show.title}`,
+      title: `🎭 Theater: ${show.title}`,
       body: `${tgl} WIB • ${show.member_count} member${seitansai}`,
       data: {
         type: "theater",
@@ -215,7 +286,7 @@ async function checkBirthday(tokens) {
       if (!(await hasInCache("birthday", key))) {
         const countdown = daysLeft === 1 ? "Besok ulang tahun!" : `${daysLeft} hari lagi ulang tahun!`;
         await sendPushToAll(tokens, {
-          title: `${name} JKT48 — ${countdown}`,
+          title: `🎀 ${name} JKT48 — ${countdown}`,
           body: `${name} akan berulang tahun ke-${age_after_birthday} dalam ${daysLeft} hari. Siapkan ucapanmu!`,
           data: { type: "birthday", url_key, subtype: "reminder", days_left: daysLeft, age: age_after_birthday },
         });
