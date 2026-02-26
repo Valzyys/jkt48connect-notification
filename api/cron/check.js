@@ -2,7 +2,12 @@
 
 const { getLiveStreams, getLatestNews, getLatestTheater, getBirthdays } = require("../../lib/jkt48api");
 const { sendPushToAll } = require("../../lib/push");
-const { getAllTokens, hasInCache, addToCache, removeFromCache, getAllFromCache } = require("../../lib/storage");
+const {
+  getAllTokens,
+  tryAcquireCache,
+  removeFromCache,
+  getAllFromCache,
+} = require("../../lib/storage");
 
 const BIRTHDAY_REMINDER_DAYS = 7;
 
@@ -40,7 +45,10 @@ module.exports = function handler(req, res) {
   });
 };
 
-// ── LIVE — kirim semua yang sedang live, bersihkan yang sudah offline ──────────
+// ── LIVE ──────────────────────────────────────────────────────────────────────
+// Cache permanent tanpa TTL.
+// Selama stream ada di API → cache ada → notif tidak dikirim ulang.
+// Saat stream tidak ada di API lagi → cache dihapus otomatis.
 function checkLive(tokens) {
   return getLiveStreams().then(function(streams) {
     var activeIds = new Set(streams.map(function(s) { return String(s.chat_room_id); }));
@@ -50,39 +58,47 @@ function checkLive(tokens) {
     streams.forEach(function(stream) {
       chain = chain.then(function() {
         var id = String(stream.chat_room_id);
-        return hasInCache("live", id).then(function(cached) {
-          if (cached) return;
+        return tryAcquireCache("live", id).then(function(acquired) {
+          if (!acquired) return;
           var tipe = (stream.type || "IDN").toUpperCase();
           var mulai = stream.started_at
             ? new Date(stream.started_at).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Jakarta" })
             : "";
           return sendPushToAll(tokens, {
-            title: "Live - " + stream.name + " sedang LIVE!",
+            title: stream.name + " sedang LIVE!",
             body: tipe + " Live" + (mulai ? " - Mulai " + mulai + " WIB" : "") + " - Ketuk untuk nonton!",
             data: { type: "live", room_id: stream.chat_room_id, url_key: stream.url_key, slug: stream.slug },
-          }).then(function() { return addToCache("live", id); }).then(function() { sent++; });
+            channelId: "jkt48-live",
+          }).then(function() { sent++; });
         });
       });
     });
 
     return chain.then(function() {
+      // Auto-delete cache stream yang sudah offline (tidak ada di API)
       return getAllFromCache("live").then(function(cached) {
         var cleared = 0;
         var cleanChain = Promise.resolve();
         cached.forEach(function(id) {
           if (!activeIds.has(id)) {
             cleanChain = cleanChain.then(function() {
-              return removeFromCache("live", id).then(function() { cleared++; });
+              return removeFromCache("live", id).then(function() {
+                cleared++;
+                console.log("[CRON] Live offline, cache dihapus: " + id);
+              });
             });
           }
         });
-        return cleanChain.then(function() { return { sent: sent, active: activeIds.size, cleared: cleared }; });
+        return cleanChain.then(function() {
+          return { sent: sent, active: activeIds.size, cleared: cleared };
+        });
       });
     });
   });
 }
 
-// ── NEWS — hanya item terbaru (index 0) ───────────────────────────────────────
+// ── NEWS ──────────────────────────────────────────────────────────────────────
+// Cache permanent — ID berita selalu unik, tidak akan spam.
 function checkNews(tokens) {
   return getLatestNews().then(function(list) {
     var sent = 0;
@@ -92,13 +108,14 @@ function checkNews(tokens) {
       chain = chain.then(function() {
         var id = item._id || item.id;
         if (!id) return;
-        return hasInCache("news", id).then(function(cached) {
-          if (cached) return;
+        return tryAcquireCache("news", id).then(function(acquired) {
+          if (!acquired) return;
           return sendPushToAll(tokens, {
             title: "Berita Terbaru JKT48",
             body: item.title || "Ada berita baru dari JKT48!",
             data: { type: "news", news_id: item.id, mongo_id: item._id, date: item.date },
-          }).then(function() { return addToCache("news", id); }).then(function() { sent++; });
+            channelId: "jkt48-notifications",
+          }).then(function() { sent++; });
         });
       });
     });
@@ -107,7 +124,8 @@ function checkNews(tokens) {
   });
 }
 
-// ── THEATER — hanya item terbaru (index 0) ────────────────────────────────────
+// ── THEATER ───────────────────────────────────────────────────────────────────
+// Cache permanent — ID show selalu unik, tidak akan spam.
 function checkTheater(tokens) {
   return getLatestTheater().then(function(list) {
     var sent = 0;
@@ -116,8 +134,8 @@ function checkTheater(tokens) {
     list.forEach(function(show) {
       chain = chain.then(function() {
         var id = String(show.id);
-        return hasInCache("theater", id).then(function(cached) {
-          if (cached) return;
+        return tryAcquireCache("theater", id).then(function(acquired) {
+          if (!acquired) return;
           var tgl = show.date
             ? new Date(show.date).toLocaleString("id-ID", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Jakarta" })
             : "";
@@ -125,10 +143,11 @@ function checkTheater(tokens) {
             ? " - Seitansai: " + show.seitansai.map(function(s) { return s.name; }).join(", ")
             : "";
           return sendPushToAll(tokens, {
-            title: "Theater: " + show.title,
+            title: show.title,
             body: tgl + " WIB - " + show.member_count + " member" + seitansai,
             data: { type: "theater", theater_id: show.id, url: show.url, seitansai: show.seitansai || [] },
-          }).then(function() { return addToCache("theater", id); }).then(function() { sent++; });
+            channelId: "jkt48-notifications",
+          }).then(function() { sent++; });
         });
       });
     });
@@ -138,6 +157,7 @@ function checkTheater(tokens) {
 }
 
 // ── BIRTHDAY ──────────────────────────────────────────────────────────────────
+// Cache permanent — key sudah include tanggal/hari sehingga tidak akan spam.
 function checkBirthday(tokens) {
   return getBirthdays().then(function(members) {
     var sent = 0;
@@ -154,34 +174,31 @@ function checkBirthday(tokens) {
         if (m.is_birthday_today) {
           var todayKey = url_key + "-today";
           p = p.then(function() {
-            return hasInCache("birthday", todayKey).then(function(cached) {
-              if (cached) return;
+            return tryAcquireCache("birthday", todayKey).then(function(acquired) {
+              if (!acquired) return;
               return sendPushToAll(tokens, {
                 title: "Selamat Ulang Tahun " + name + "!",
                 body: name + " JKT48 hari ini berulang tahun ke-" + age + "! Kirimkan ucapanmu!",
                 data: { type: "birthday", url_key: url_key, subtype: "today", age: age },
-              }).then(function() { return addToCache("birthday", todayKey); }).then(function() { sent++; });
-            });
-          });
-        } else {
-          p = p.then(function() {
-            return hasInCache("birthday", url_key + "-today").then(function(cached) {
-              if (cached) return removeFromCache("birthday", url_key + "-today");
+                channelId: "jkt48-notifications",
+              }).then(function() { sent++; });
             });
           });
         }
 
         if (daysLeft > 0 && daysLeft <= BIRTHDAY_REMINDER_DAYS) {
+          // Key sudah include daysLeft — tiap hari reminder punya key beda
           var rKey = url_key + "-reminder-" + daysLeft;
           p = p.then(function() {
-            return hasInCache("birthday", rKey).then(function(cached) {
-              if (cached) return;
+            return tryAcquireCache("birthday", rKey).then(function(acquired) {
+              if (!acquired) return;
               var countdown = daysLeft === 1 ? "Besok ulang tahun!" : daysLeft + " hari lagi ulang tahun!";
               return sendPushToAll(tokens, {
-                title: "Reminder: " + name + " JKT48 - " + countdown,
+                title: name + " - " + countdown,
                 body: name + " akan berulang tahun ke-" + age + " dalam " + daysLeft + " hari. Siapkan ucapanmu!",
                 data: { type: "birthday", url_key: url_key, subtype: "reminder", days_left: daysLeft, age: age },
-              }).then(function() { return addToCache("birthday", rKey); }).then(function() { sent++; });
+                channelId: "jkt48-notifications",
+              }).then(function() { sent++; });
             });
           });
         }
